@@ -35,6 +35,7 @@ class BinLogStreamReader(object):
         self.__server_id = server_id
         self.__log_pos = None
         self.__log_file = None
+        self.__use_checksum = False
 
         #Store table meta information
         self.table_map = {}
@@ -55,9 +56,29 @@ class BinLogStreamReader(object):
         self._ctl_connection = pymysql.connect(**self._ctl_connection_settings)
         self.__connected_ctl = True
 
+    def __checksum_enabled(self):
+        '''Return True if binlog-checksum = CRC32. Only for MySQL > 5.6 '''
+        cur = self._stream_connection.cursor()
+        cur.execute("SHOW GLOBAL VARIABLES LIKE 'BINLOG_CHECKSUM'")
+        result = cur.fetchone()
+        cur.close()
+
+        if result is None:
+            return False
+        var, value = result[:2]
+        if value == 'NONE':
+            return False
+        return True
+
     def __connect_to_stream(self):
         self._stream_connection = pymysql.connect(**self.__connection_settings)
+        self.__use_checksum = self.__checksum_enabled()
         cur = self._stream_connection.cursor()
+
+        #If cheksum is enabled we need to inform the server about the that we support it
+        if self.__use_checksum:
+            cur.execute("set @master_binlog_checksum= @@global.binlog_checksum")
+
         cur.execute("SHOW MASTER STATUS")
         log_file, log_pos = cur.fetchone()[:2]
         cur.close()
@@ -106,7 +127,7 @@ class BinLogStreamReader(object):
             if not pkt.is_ok_packet():
                 return None
             binlog_event = BinLogPacketWrapper(
-                pkt, self.table_map, self._ctl_connection)
+                pkt, self.table_map, self._ctl_connection, self.__use_checksum)
             if binlog_event.event_type == TABLE_MAP_EVENT:
                 self.table_map[binlog_event.event.table_id] = \
                     binlog_event.event.get_table()
